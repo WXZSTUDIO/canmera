@@ -11,6 +11,25 @@
   <link rel="apple-touch-icon" href="./icon.svg" />
   <link rel="stylesheet" href="./styles.css" />
   <title>canmera</title>
+  <script>
+    // 一次性自愈：访问 ?reset 时清空 Service Worker 与全部缓存后自动重载。
+    // 用于摆脱旧版 cache-first 缓存锁死（旧代码刷新不生效）的情况。
+    (function () {
+      if (location.search.indexOf('reset') === -1) return;
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          return Promise.all(regs.map(function (r) { return r.unregister(); }));
+        }).catch(function () {});
+      }
+      if (window.caches) {
+        caches.keys().then(function (keys) {
+          return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+        }).catch(function () {});
+      }
+      try { localStorage.removeItem('canmera-reset-v1'); } catch (e) {}
+      setTimeout(function () { location.replace(location.pathname); }, 800);
+    })();
+  </script>
 </head>
 <body>
   <div id="app">
@@ -91,6 +110,11 @@
     <!-- 快门 -->
     <button class="shutter" id="btn-shutter" type="button"><span class="ring"></span></button>
 
+    <!-- 最近一张（原生相机风格缩略图，点击查看详情） -->
+    <button class="thumb" id="thumb" type="button" hidden aria-label="查看最近拍摄">
+      <img id="thumb-img" alt="最近拍摄" />
+    </button>
+
     <!-- 底部面板 -->
     <div class="panel" id="panel" hidden>
       <div class="panel-head">
@@ -100,15 +124,22 @@
       <div class="panel-body" id="panel-body"></div>
     </div>
 
-    <!-- 结果预览 -->
-    <div id="preview" class="preview" hidden>
-      <div class="preview-inner">
-        <div id="preview-media" class="preview-media"></div>
-        <div class="preview-actions">
-          <button id="pv-download" class="pbtn" type="button">下载</button>
-          <button id="pv-share" class="pbtn" type="button">分享</button>
-          <button id="pv-close" class="pbtn pbtn-ghost" type="button">关闭</button>
-        </div>
+    <!-- 拍摄结果查看器：关闭方式 = 右上 ✕ / 点空白 / ESC / 下滑 -->
+    <div id="viewer" class="viewer" aria-hidden="true">
+      <button class="viewer-close" id="viewer-close" type="button" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+      </button>
+      <div class="viewer-stage" id="viewer-stage"></div>
+      <p class="viewer-hint">点击空白处或下滑关闭</p>
+      <div class="viewer-bar">
+        <button id="pv-download" class="vbtn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12" /><path d="M7 11l5 5 5-5" /><path d="M4 20h16" /></svg>
+          下载
+        </button>
+        <button id="pv-share" class="vbtn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4" /><path d="M7 9l5-5 5 5" /><path d="M5 14v6h14v-6" /></svg>
+          分享
+        </button>
       </div>
     </div>
 

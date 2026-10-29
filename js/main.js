@@ -43,8 +43,11 @@ const panel = document.getElementById('panel');
 const panelTitle = document.getElementById('panel-title');
 const panelBody = document.getElementById('panel-body');
 const panelClose = document.getElementById('panel-close');
-const preview = document.getElementById('preview');
-const previewMedia = document.getElementById('preview-media');
+const viewer = document.getElementById('viewer');
+const viewerStage = document.getElementById('viewer-stage');
+const viewerClose = document.getElementById('viewer-close');
+const thumb = document.getElementById('thumb');
+const thumbImg = document.getElementById('thumb-img');
 const fileInput = document.getElementById('file-input');
 const focalEl = document.getElementById('focal');
 
@@ -713,6 +716,7 @@ async function capturePhoto() {
     const blob = await canvasToBlob(scaled, 'image/jpeg', 0.92);
     if (!blob) { toast('抓拍失败'); return; }
     showPreview(blob, 'image');
+    toast('已保存 · 点左下角查看');
   } catch (e) {
     toast('抓拍出错：' + (e && e.message ? e.message : e));
   }
@@ -740,7 +744,10 @@ function toggleRecord() {
     camera.stopRecording().then((blob) => {
       state.recording = false;
       btnShutter.classList.remove('recording');
-      if (blob && blob.size > 0) showPreview(blob, 'video');
+      if (blob && blob.size > 0) {
+        showPreview(blob, 'video');
+        openViewer(); // 录影是明确动作，结束后直接展示结果
+      }
       else toast('录制内容为空');
     }).catch((e) => {
       state.recording = false;
@@ -750,29 +757,100 @@ function toggleRecord() {
   }
 }
 
-// ---------- 结果预览 ----------
-function showPreview(blob, type) {
+// ---------- 结果查看器 ----------
+// 显隐统一由 .is-open 类控制（不再用 hidden 属性，避免作者样式表覆盖 UA 规则）。
+function openViewer() {
+  if (!state.lastResult) return;
+  viewer.classList.add('is-open');
+  viewer.setAttribute('aria-hidden', 'false');
+}
+
+function closeViewer() {
+  viewer.classList.remove('is-open');
+  viewer.setAttribute('aria-hidden', 'true');
+  // 关闭后暂停视频，避免后台继续播放
+  const v = viewerStage.querySelector('video');
+  if (v) v.pause();
+}
+
+// 视频抽帧生成缩略图（取靠前的一帧，失败则降级为空）
+function makeVideoThumb(blob) {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    v.playsInline = true;
+    const objUrl = URL.createObjectURL(blob);
+    v.src = objUrl;
+    v.onloadeddata = () => { v.currentTime = Math.min(0.2, (v.duration || 1) / 2); };
+    v.onseeked = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = 120;
+        c.height = Math.max(1, Math.round(120 * ((v.videoHeight || 9) / (v.videoWidth || 16))));
+        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', 0.8));
+      } catch (e) { resolve(null); }
+      URL.revokeObjectURL(objUrl);
+    };
+    v.onerror = () => { URL.revokeObjectURL(objUrl); resolve(null); };
+  });
+}
+
+// 抓拍/录影结果：写入查看器 + 更新左下角缩略图，但不打断当前拍摄
+async function showPreview(blob, type) {
   state.lastResult = { blob, type };
-  previewMedia.innerHTML = '';
   const url = URL.createObjectURL(blob);
+
+  viewerStage.innerHTML = '';
   if (type === 'image') {
     const img = document.createElement('img');
     img.src = url;
-    previewMedia.appendChild(img);
+    viewerStage.appendChild(img);
+    thumbImg.src = url;
+    thumb.hidden = false;
   } else {
     const v = document.createElement('video');
     v.src = url;
     v.controls = true;
     v.loop = true;
     v.autoplay = true;
-    previewMedia.appendChild(v);
+    v.playsInline = true;
+    viewerStage.appendChild(v);
+    const frame = await makeVideoThumb(blob);
+    if (frame) { thumbImg.src = frame; thumb.hidden = false; }
+    else { thumb.hidden = false; thumbImg.removeAttribute('src'); }
   }
-  preview.hidden = false;
 }
-document.getElementById('pv-close').addEventListener('click', () => {
-  preview.hidden = true;
-  state.lastResult = null;
+
+// 关闭方式 1：右上角 ✕
+viewerClose.addEventListener('click', closeViewer);
+
+// 关闭方式 2：点击画面空白处
+viewerStage.addEventListener('click', (e) => {
+  if (e.target === viewerStage) closeViewer();
 });
+
+// 关闭方式 3：ESC 键（桌面端）
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && viewer.classList.contains('is-open')) closeViewer();
+});
+
+// 关闭方式 4：向下滑动
+let vTouchY = null;
+viewer.addEventListener('touchstart', (e) => {
+  vTouchY = e.touches[0] ? e.touches[0].clientY : null;
+}, { passive: true });
+viewer.addEventListener('touchmove', (e) => {
+  if (vTouchY === null || !e.touches[0]) return;
+  // 下滑超过 80px 即关闭
+  if (e.touches[0].clientY - vTouchY > 80) { closeViewer(); vTouchY = null; }
+}, { passive: true });
+viewer.addEventListener('touchend', () => { vTouchY = null; });
+
+// 点左下角缩略图查看
+thumb.addEventListener('click', openViewer);
+
 document.getElementById('pv-download').addEventListener('click', () => {
   if (state.lastResult) downloadBlob(state.lastResult.blob, state.lastResult.type);
 });
@@ -894,7 +972,32 @@ document.addEventListener('pointerdown', boot, { once: true });
 
 // ---------- PWA ----------
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('./sw.js');
+      // 清理历史遗留缓存（旧 cache-first 版本的 canmera-v1），避免旧代码被锁死
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys
+            .filter((k) => k.startsWith('canmera-') && k !== 'canmera-v2')
+            .map((k) => caches.delete(k))
+        );
+      }
+      // 有等待中的新版本时立即接管，不等用户关闭所有标签页
+      if (reg.waiting) reg.waiting.postMessage('SKIP_WAITING');
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', () => {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            nw.postMessage('SKIP_WAITING');
+          }
+        });
+      });
+      await reg.update();
+    } catch (e) {
+      /* 注册失败不影响主功能 */
+    }
   });
 }
