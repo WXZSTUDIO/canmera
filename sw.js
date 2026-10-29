@@ -1,7 +1,7 @@
 // sw.js —— 离线壳缓存：让 PWA 在无网络时仍能打开应用骨架。
 // 策略：静态资源安装期预缓存；运行期 cache-first，并回填新资源到缓存。
 
-const CACHE = 'tianfeng-camera-v1';
+const CACHE = 'canmera-v1';
 const ASSETS = [
   './',
   './index.html',

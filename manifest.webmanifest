@@ -1,14 +1,14 @@
 {
-  "name": "飓风相机 PWA",
-  "short_name": "飓风相机",
-  "description": "浏览器端实时电影感 Log 拍摄相机，复刻影视飓风飓风相机：实时影调、手动曝光/白平衡、对焦、拍照、录影与本地图片套色。",
+  "name": "canmera",
+  "short_name": "canmera",
+  "description": "浏览器端实时电影感 Log 拍摄相机：实时影调、手动曝光/白平衡/色调、半自动 ISO 与快门、音频电平、拍照、录影与本地图片套色。",
   "lang": "zh-CN",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#000000",
-  "theme_color": "#0b0b0f",
+  "theme_color": "#000000",
   "icons": [
     {
       "src": "./icon.svg",

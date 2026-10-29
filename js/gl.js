@@ -1,10 +1,12 @@
 // js/gl.js
-// WebGL 渲染器：负责上下文创建、着色器编译、纹理上传、uniform 设置与渲染循环。
+// WebGL 渲染器：上下文创建、着色器编译、纹理上传、uniform 设置与渲染循环。
 // 优先 WebGL2，回退 WebGL1；着色器统一使用 GLSL ES 1.00，两者兼容。
+//
+// 影调管线：上一帧混合(慢快门) -> 色彩矩阵 -> 色相 -> 色温 -> 色调 -> 曝光(ISO/快门/补偿)
+//          -> 对比度 -> 饱和度 -> 高亮增益 -> SDR 肩部 -> 暗角 -> 颗粒
 
 import { tempToRGB } from './looks.js';
 
-// 顶点着色器：全屏四边形
 const VERT_SRC = `
 attribute vec2 a_position;
 attribute vec2 a_texCoord;
@@ -15,16 +17,16 @@ void main() {
 }
 `;
 
-// 片元着色器：影调调色管线
-// 处理顺序：色彩矩阵 -> 色相旋转 -> 色温增益 -> 曝光 -> 对比度 -> 饱和度 -> 暗角 -> 颗粒
 const FRAG_SRC = `
 precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
+uniform sampler2D u_prevTex;
 uniform mat3 u_matrix;
 uniform vec3 u_offset;
 uniform float u_hue;
 uniform vec3 u_tempRGB;
+uniform float u_tint;
 uniform float u_exposure;
 uniform float u_contrast;
 uniform float u_saturation;
@@ -32,8 +34,10 @@ uniform float u_grain;
 uniform float u_vignette;
 uniform float u_time;
 uniform vec2 u_uvScale;
+uniform float u_trail;
+uniform float u_highlight;
+uniform float u_sdr;
 
-// 伪随机噪声，用于颗粒（随时间变化避免静止）
 float rand(vec2 co) {
   return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
 }
@@ -44,7 +48,7 @@ mat3 hueMatrix(float a) {
   float s = sin(a);
   float k = 1.0 / 3.0;
   float t = (1.0 - c) * k;
-  float sq = s / 1.7320508; // 1/sqrt(3)
+  float sq = s / 1.7320508;
   return mat3(
     c + t,  t + sq,  t - sq,
     t - sq, c + t,   t + sq,
@@ -60,41 +64,58 @@ void main() {
     return;
   }
 
-  vec3 color = texture2D(u_tex, uv).rgb;
+  vec3 cur = texture2D(u_tex, uv).rgb;
+  vec3 prv = texture2D(u_prevTex, uv).rgb;
+  // 慢快门：与上一帧混合，模拟运动模糊 / 长曝光
+  vec3 color = mix(cur, (cur + prv) * 0.5, u_trail);
 
   // 1) 创意色彩矩阵 + lift
   color = u_matrix * color + u_offset;
   // 2) 色相旋转
   color = hueMatrix(u_hue) * color;
-  // 3) 色温增益（RGB 乘性校正）
+  // 3) 色温增益
   color *= u_tempRGB;
-  // 4) 曝光
+  // 4) 白平衡色调（正=洋红，负=绿）
+  float tv = u_tint * 0.08;
+  color.r += tv;
+  color.b += tv;
+  color.g -= tv;
+  // 5) 曝光（含 ISO / 快门 / 曝光补偿）
   color *= u_exposure;
-  // 5) 对比度（以 0.5 灰为中点）
+  // 6) 对比度（以 0.5 灰为中点）
   color = (color - 0.5) * u_contrast + 0.5;
-  // 6) 饱和度
+  // 7) 饱和度
   float luma = dot(color, vec3(0.299, 0.587, 0.114));
   color = mix(vec3(luma), color, u_saturation);
-  // 7) 暗角
+
+  // 8) 高亮增益（HDR 观感）：提升高光区域
+  if (u_highlight > 0.0) {
+    float hl = smoothstep(0.45, 1.0, luma);
+    color += color * hl * u_highlight * 0.4;
+  }
+  // 9) SDR 肩部柔化：避免高光死白，提升 SDR 兼容性
+  if (u_sdr > 0.0) {
+    color = mix(color, color / (1.0 + max(color - 0.8, 0.0)), u_sdr);
+  }
+
+  // 10) 暗角
   vec2 d = v_uv - 0.5;
   float dist = length(d) * 1.41421356;
   float vig = 1.0 - u_vignette * smoothstep(0.35, 0.95, dist);
   color *= vig;
-  // 8) 颗粒
+  // 11) 颗粒
   float n = (rand(v_uv * 100.0 + fract(u_time)) - 0.5) * u_grain;
   color += n;
-  // 限幅
-  color = clamp(color, 0.0, 1.0);
 
+  color = clamp(color, 0.0, 1.0);
   gl_FragColor = vec4(color, 1.0);
 }
 `;
 
-/**
- * 将行主序 3x3 矩阵转为列主序（WebGL uniformMatrix3fv 期望列主序）。
- * @param {number[]} rows 9 个数，[r0c0,r0c1,r0c2, r1c0,r1c1,r2c2...]
- * @returns {Float32Array}
- */
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 function colMajorFromRows(rows) {
   return new Float32Array([
     rows[0], rows[3], rows[6],
@@ -115,24 +136,17 @@ function compileShader(gl, type, src) {
   return sh;
 }
 
-/**
- * WebGL 渲染器类。
- */
 export class GLRenderer {
-  /**
-   * @param {HTMLCanvasElement} canvas 显示用画布（会被填充为调色后画面）
-   */
   constructor(canvas) {
     this.canvas = canvas;
     const opts = {
       alpha: false,
-      preserveDrawingBuffer: true, // 便于截图 / 录屏读取像素
+      preserveDrawingBuffer: true,
       antialias: false,
       premultipliedAlpha: false,
       depth: false,
       stencil: false,
     };
-    // 优先 WebGL2，回退 WebGL1
     const gl2 = canvas.getContext('webgl2', opts);
     if (gl2) {
       this.gl = gl2;
@@ -141,27 +155,19 @@ export class GLRenderer {
       this.gl = canvas.getContext('webgl', opts) || canvas.getContext('experimental-webgl', opts);
       this.isWebGL2 = false;
     }
-    if (!this.gl) {
-      throw new Error('当前浏览器不支持 WebGL');
-    }
+    if (!this.gl) throw new Error('当前浏览器不支持 WebGL');
 
     this.program = this._createProgram();
     this.gl.useProgram(this.program);
 
-    // 全屏四边形（位置 + 纹理坐标，交织存储）
     this.quad = this.gl.createBuffer();
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.quad);
     this.gl.bufferData(
       this.gl.ARRAY_BUFFER,
-      new Float32Array([
-        -1, -1, 0, 0,
-        1, -1, 1, 0,
-        -1, 1, 0, 1,
-        1, 1, 1, 1,
-      ]),
+      new Float32Array([-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1]),
       this.gl.STATIC_DRAW
     );
-    const stride = 4 * 4; // 4 个 float
+    const stride = 4 * 4;
     this.aPos = this.gl.getAttribLocation(this.program, 'a_position');
     this.aUV = this.gl.getAttribLocation(this.program, 'a_texCoord');
     this.gl.enableVertexAttribArray(this.aPos);
@@ -169,23 +175,19 @@ export class GLRenderer {
     this.gl.enableVertexAttribArray(this.aUV);
     this.gl.vertexAttribPointer(this.aUV, 2, this.gl.FLOAT, false, stride, 2 * 4);
 
-    // 纹理（NPOT 安全：CLAMP + LINEAR，无 mipmap）
-    this.texture = this.gl.createTexture();
-    this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
-    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
-    this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, true);
+    // 双纹理 ping-pong：texs[cur] 为本帧源，texs[1-cur] 保留上一帧（慢快门用）
+    this.texs = [this._createTexture(), this._createTexture()];
+    this.texIdx = 0;
 
-    // 缓存 uniform 位置
     const u = (name) => this.gl.getUniformLocation(this.program, name);
     this.u = {
       tex: u('u_tex'),
+      prevTex: u('u_prevTex'),
       matrix: u('u_matrix'),
       offset: u('u_offset'),
       hue: u('u_hue'),
       tempRGB: u('u_tempRGB'),
+      tint: u('u_tint'),
       exposure: u('u_exposure'),
       contrast: u('u_contrast'),
       saturation: u('u_saturation'),
@@ -193,20 +195,56 @@ export class GLRenderer {
       vignette: u('u_vignette'),
       time: u('u_time'),
       uvScale: u('u_uvScale'),
+      trail: u('u_trail'),
+      highlight: u('u_highlight'),
+      sdr: u('u_sdr'),
     };
     this.gl.uniform1i(this.u.tex, 0);
+    this.gl.uniform1i(this.u.prevTex, 1);
 
     // 状态默认值
     this.source = null;
-    this.sourceKind = null; // 'video' | 'image'
+    this.sourceKind = null;
     this.needUpload = false;
     this.look = null;
-    this.exposure = 0;
-    this.temperature = 6500;
+    this.lookOffset = new Float32Array([0, 0, 0]);
+    this.u_matrix = colMajorFromRows([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    this.hue = 0;
+    this.contrast = 1;
+    this.saturation = 1;
+    this.grain = 0;
+    this.vignette = 0;
     this.lookExposure = 0;
+
+    this.expComp = 0;      // 用户曝光补偿（档）
+    this.iso = null;       // null=自动；否则 ISO 数值
+    this.shutter = null;   // null=自动；否则快门秒数
+    this.tint = 0;         // 白平衡色调 -1(绿) ~ +1(洋红)
+    this.highlight = 0;    // 高亮增益 0/1
+    this.sdr = 0;          // SDR 肩部柔化 0/1
+    this.temperature = 6500;
+    this.totalExp = 1;
+    this.trail = 0;
+
     this.startTime = performance.now();
     this.running = false;
     this._raf = 0;
+  }
+
+  _createTexture() {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // 初始化为 1x1 黑色，保证纹理完整可采样（首帧上一帧为黑）
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([0, 0, 0, 255])
+    );
+    return tex;
   }
 
   _createProgram() {
@@ -218,20 +256,17 @@ export class GLRenderer {
     gl.attachShader(prog, fs);
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const log = gl.getProgramInfoLog(prog);
-      throw new Error('着色器链接失败: ' + log);
+      throw new Error('着色器链接失败: ' + gl.getProgramInfoLog(prog));
     }
     return prog;
   }
 
-  /** 设置渲染源（video 或 image 元素） */
   setSource(el, kind) {
     this.source = el;
     this.sourceKind = kind;
     this.needUpload = true;
   }
 
-  /** 设置当前影调预设 */
   setLook(look) {
     this.look = look;
     this.u_matrix = colMajorFromRows(look.matrix);
@@ -242,75 +277,139 @@ export class GLRenderer {
     this.grain = look.grain != null ? look.grain : 0.0;
     this.vignette = look.vignette != null ? look.vignette : 0.0;
     this.lookExposure = look.exposure != null ? look.exposure : 0;
+    this._updateExposure();
   }
 
-  /** 用户曝光补偿（-2 ~ +2 档） */
   setExposure(v) {
-    this.exposure = v;
+    this.expComp = v;
+    this._updateExposure();
   }
 
-  /** 用户白平衡色温（K） */
+  /** ISO：null 表示自动 */
+  setISO(iso) {
+    this.iso = iso;
+    this._updateExposure();
+  }
+
+  /** 快门速度（秒）：null 表示自动 */
+  setShutter(sec) {
+    this.shutter = sec;
+    this._updateExposure();
+  }
+
+  setTint(t) {
+    this.tint = t;
+  }
+
+  setHighlight(on) {
+    this.highlight = on ? 1 : 0;
+  }
+
+  setSDR(on) {
+    this.sdr = on ? 1 : 0;
+  }
+
   setTemperature(k) {
     this.temperature = k;
   }
 
-  /** 绘制一帧（内部调用） */
+  /** 合成总曝光：曝光补偿 · ISO 增益 · 快门增益，并推导慢快门拖影强度 */
+  _updateExposure() {
+    const isoGain = this.iso == null ? 1 : clamp(this.iso / 400, 0.2, 8);
+    const sGain = this.shutter == null ? 1 : clamp(this.shutter / (1 / 48), 0.05, 6);
+    this.totalExp = clamp(
+      Math.pow(2, this.expComp + this.lookExposure) * isoGain * sGain,
+      0.02,
+      8
+    );
+    // 快门慢于 1/120s 起产生运动模糊，1/2s 达到最强
+    const s = this.shutter;
+    const raw = s == null ? 0 : (s - 1 / 120) / (0.5 - 1 / 120);
+    this.trail = clamp(raw, 0, 1) * 0.85;
+  }
+
   renderFrame() {
     const gl = this.gl;
     if (!this.source || !this.look) return;
 
-    // 上传纹理：video 每帧更新，image 仅首次
-    if (this.needUpload || this.sourceKind === 'video') {
-      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    const isVideo = this.sourceKind === 'video';
+    const cur = this.texs[this.texIdx];
+    const prv = this.texs[1 - this.texIdx];
+
+    const upload = (tex) => {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
       try {
-        if (this.sourceKind === 'video') {
+        if (isVideo) {
           if (this.source.readyState >= 2) {
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.source);
           }
         } else {
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.source);
         }
-        this.needUpload = false;
       } catch (e) {
-        // 资源尚未就绪，下一帧重试
+        /* 资源未就绪，下一帧重试 */
       }
+    };
+
+    if (isVideo) {
+      upload(cur);
+      this.needUpload = false;
+    } else if (this.needUpload) {
+      // 静态图：一次性写入两张纹理，上一帧与当前一致（拖影无副作用）
+      upload(cur);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, prv);
+      try {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.source);
+      } catch (e) { /* ignore */ }
+      this.needUpload = false;
     }
 
-    // 设置 uniform
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, cur);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, prv);
+
     gl.uniformMatrix3fv(this.u.matrix, false, this.u_matrix);
     gl.uniform3fv(this.u.offset, this.lookOffset);
     gl.uniform1f(this.u.hue, this.hue);
     const tRGB = tempToRGB(this.temperature);
     gl.uniform3f(this.u.tempRGB, tRGB[0], tRGB[1], tRGB[2]);
-    const totalExp = Math.pow(2, this.exposure + this.lookExposure);
-    gl.uniform1f(this.u.exposure, totalExp);
+    gl.uniform1f(this.u.tint, this.tint);
+    gl.uniform1f(this.u.exposure, this.totalExp);
     gl.uniform1f(this.u.contrast, this.contrast);
     gl.uniform1f(this.u.saturation, this.saturation);
     gl.uniform1f(this.u.grain, this.grain);
     gl.uniform1f(this.u.vignette, this.vignette);
     gl.uniform1f(this.u.time, (performance.now() - this.startTime) / 1000);
+    gl.uniform1f(this.u.trail, this.trail);
+    gl.uniform1f(this.u.highlight, this.highlight);
+    gl.uniform1f(this.u.sdr, this.sdr);
 
     // cover 裁剪比例
     const cw = this.canvas.width;
     const ch = this.canvas.height;
-    let sw = this.source.videoWidth || this.source.naturalWidth || this.source.width || cw;
-    let sh = this.source.videoHeight || this.source.naturalHeight || this.source.height || ch;
+    const sw = this.source.videoWidth || this.source.naturalWidth || this.source.width || cw;
+    const sh = this.source.videoHeight || this.source.naturalHeight || this.source.height || ch;
     const ca = cw / ch;
     const sa = sw / sh;
     let sx = 1;
     let sy = 1;
     if (sa > ca) {
-      sx = ca / sa; // 源更宽，裁左右
+      sx = ca / sa;
     } else {
-      sy = sa / ca; // 源更高，裁上下
+      sy = sa / ca;
     }
     gl.uniform2f(this.u.uvScale, sx, sy);
 
     gl.viewport(0, 0, cw, ch);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // 交换：本帧纹理下一年成为「上一帧」
+    this.texIdx = 1 - this.texIdx;
   }
 
-  /** 启动渲染循环 */
   start() {
     if (this.running) return;
     this.running = true;
@@ -322,33 +421,22 @@ export class GLRenderer {
     this._raf = requestAnimationFrame(loop);
   }
 
-  /** 停止渲染循环 */
   stop() {
     this.running = false;
     if (this._raf) cancelAnimationFrame(this._raf);
   }
 
-  /**
-   * 获取画布的实时视频流（用于 MediaRecorder 录屏）。
-   * @param {number} fps
-   * @returns {MediaStream}
-   */
   getStream(fps) {
     const fn = this.canvas.captureStream || this.canvas.mozCaptureStream;
     if (!fn) throw new Error('当前环境不支持 captureStream');
     return fn.call(this.canvas, fps || 30);
   }
 
-  /**
-   * 把当前调色后画面绘制到一张 2D 画布（用于拍照/导出）。
-   * @returns {HTMLCanvasElement}
-   */
   captureToCanvas() {
     const c = document.createElement('canvas');
     c.width = this.canvas.width;
     c.height = this.canvas.height;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(this.canvas, 0, 0);
+    c.getContext('2d').drawImage(this.canvas, 0, 0);
     return c;
   }
 }

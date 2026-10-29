@@ -1,13 +1,12 @@
 // js/looks.js
 // 影调（Look）预设定义 + 色彩工具函数。
-// 新增影调只需往 LOOKS 数组追加一项，渲染管线会自动适配。
+// 新增影调只需往 LOOKS 数组追加一项，渲染管线与 UI 会自动适配。
 
 /**
  * 色温(Kelvin) -> RGB 增益。
  * 基于 Tanner Helland 黑体近似算法，归一化到 [0,1]。
- * 6500K 附近接近白色，低温偏暖（红多蓝少），高温偏冷（蓝多红少）。
- * @param {number} kelvin 色温，单位开尔文
- * @returns {[number, number, number]} 归一化 RGB 增益
+ * @param {number} kelvin
+ * @returns {[number, number, number]}
  */
 export function tempToRGB(kelvin) {
   const t = kelvin / 100;
@@ -33,21 +32,15 @@ export function tempToRGB(kelvin) {
 
 /**
  * 影调预设列表。
- * 每个 look 的字段含义：
- *  - id / name：标识与展示名
- *  - matrix：3x3 创意色彩矩阵（行主序 9 个数），用于青绿/暖橙等整体偏色
- *  - offset：vec3 lift，给暗部轻微提色
- *  - hue：色相旋转（弧度），进一步微调色彩倾向
- *  - temperature：推荐色温(K)，切换该影调时同步到白平衡滑杆
- *  - contrast / saturation：对比度 / 饱和度
- *  - exposure：曝光偏移（档），与用户曝光补偿相加后转亮度倍数
- *  - grain：颗粒强度
- *  - vignette：暗角强度
+ * 字段含义：
+ *  - kind：'standard' 标准影调 | 'log' Log 影调（决定顶部 Log 徽标与配色）
+ *  - matrix / offset / hue / temperature / contrast / saturation / exposure / grain / vignette：调色参数
  */
 export const LOOKS = [
   {
     id: 'neutral',
     name: '中性',
+    kind: 'standard',
     matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
     offset: [0, 0, 0],
     hue: 0,
@@ -61,6 +54,7 @@ export const LOOKS = [
   {
     id: 'macau',
     name: '标准·澳门',
+    kind: 'standard',
     matrix: [1.05, 0, 0, 0, 1.0, 0, 0, 0, 0.92],
     offset: [0.02, 0, 0],
     hue: 0.02,
@@ -74,6 +68,7 @@ export const LOOKS = [
   {
     id: 'cairo',
     name: '标准·开罗',
+    kind: 'standard',
     matrix: [1.08, -0.02, 0, 0, 1, 0, -0.04, 0, 0.88],
     offset: [0.03, 0, 0],
     hue: 0.04,
@@ -84,9 +79,40 @@ export const LOOKS = [
     grain: 0.03,
     vignette: 0.16,
   },
+  // v1.5.3 新增：拉普兰（北欧冷调）
+  {
+    id: 'lapland',
+    name: '标准·拉普兰',
+    kind: 'standard',
+    matrix: [0.94, 0, 0.02, 0, 1.0, 0, 0, 0.02, 1.1],
+    offset: [-0.01, 0, 0.02],
+    hue: -0.04,
+    temperature: 6800,
+    contrast: 1.1,
+    saturation: 0.9,
+    exposure: 0,
+    grain: 0.03,
+    vignette: 0.12,
+  },
+  // v1.5.3 新增：洛杉矶（青橙电影调）
+  {
+    id: 'losangeles',
+    name: '标准·洛杉矶',
+    kind: 'standard',
+    matrix: [1.06, 0, -0.02, 0, 1.0, 0, -0.02, 0, 1.06],
+    offset: [0.03, 0.01, -0.01],
+    hue: 0.03,
+    temperature: 5400,
+    contrast: 1.12,
+    saturation: 1.1,
+    exposure: 0,
+    grain: 0.02,
+    vignette: 0.14,
+  },
   {
     id: 'yunmeng',
     name: 'Log·云梦',
+    kind: 'log',
     matrix: [0.9, 0, 0.04, 0, 1.05, 0, 0, 0.05, 1.05],
     offset: [-0.02, 0, 0],
     hue: -0.03,
@@ -100,6 +126,7 @@ export const LOOKS = [
   {
     id: 'yili',
     name: 'Log·伊犁',
+    kind: 'log',
     matrix: [0.92, 0, 0, 0, 0.98, 0, 0, 0, 1.12],
     offset: [-0.01, -0.01, 0.02],
     hue: -0.05,
@@ -113,6 +140,7 @@ export const LOOKS = [
   {
     id: 'chiangmai',
     name: 'Log·清迈',
+    kind: 'log',
     matrix: [1, 0, 0, 0, 1.04, 0, -0.03, 0.02, 0.95],
     offset: [0.02, 0.01, 0],
     hue: 0.06,
@@ -125,11 +153,19 @@ export const LOOKS = [
   },
 ];
 
-/**
- * 按 id 查找影调。
- * @param {string} id
- * @returns {object|undefined}
- */
+/** 按 id 查找影调 */
 export function getLookById(id) {
   return LOOKS.find((l) => l.id === id);
+}
+
+/**
+ * 按自定义顺序（存 id 数组）返回影调列表。
+ * 未在顺序表中的影调按默认顺序附在末尾。
+ * @param {string[]} order 影调 id 顺序
+ */
+export function orderedLooks(order) {
+  if (!Array.isArray(order) || !order.length) return LOOKS.slice();
+  const picked = order.map((id) => getLookById(id)).filter(Boolean);
+  const rest = LOOKS.filter((l) => !order.includes(l.id));
+  return picked.concat(rest);
 }
