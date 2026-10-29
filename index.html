@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0b0f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>飓风相机 PWA</title>
+</head>
+<body>
+  <div id="app">
+    <!-- 调色后画面（全屏显示） -->
+    <canvas id="gl"></canvas>
+    <!-- 摄像头源（隐藏但保持播放，提供逐帧画面） -->
+    <video id="video" playsinline muted autoplay></video>
+
+    <!-- 顶部栏 -->
+    <header class="top-bar">
+      <div class="brand">飓风相机 <span class="brand-sub">PWA</span></div>
+      <div class="top-actions">
+        <button id="btn-local" class="icon-btn" type="button" title="本地图片套影调">图片</button>
+        <button id="btn-camera" class="icon-btn" type="button" title="开启 / 返回实时预览">相机</button>
+        <button id="btn-switch" class="icon-btn" type="button" title="切换前后镜头">翻转</button>
+        <input id="file-input" type="file" accept="image/*" hidden />
+      </div>
+    </header>
+
+    <!-- 状态提示 -->
+    <div id="status" class="status" hidden></div>
+
+    <!-- 对焦框 -->
+    <div id="focus-box" class="focus-box" hidden></div>
+
+    <!-- 底部控制坞 -->
+    <section class="dock">
+      <div class="looks" id="looks"><!-- 影调按钮由 JS 生成 --></div>
+
+      <div class="sliders">
+        <label class="slider-label">
+          <span class="slider-name">曝光 <em id="exp-val">0.0</em></span>
+          <input id="exp" type="range" min="-2" max="2" step="0.1" value="0" />
+        </label>
+        <label class="slider-label">
+          <span class="slider-name">色温 <em id="wb-val">6500K</em></span>
+          <input id="wb" type="range" min="2500" max="8000" step="50" value="6500" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="btn-capture" class="action action-capture" type="button">拍照</button>
+        <button id="btn-record" class="action action-record" type="button">录制</button>
+        <button id="btn-share" class="action action-share" type="button">分享</button>
+      </div>
+    </section>
+
+    <!-- 结果预览（图片 / 视频） -->
+    <div id="preview" class="preview" hidden>
+      <div class="preview-inner glass">
+        <div id="preview-media" class="preview-media"></div>
+        <div class="preview-actions">
+          <button id="pv-download" class="action" type="button">下载</button>
+          <button id="pv-share" class="action" type="button">分享</button>
+          <button id="pv-close" class="action action-ghost" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 轻提示 -->
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

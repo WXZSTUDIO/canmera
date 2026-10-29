@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="飓风相机">
+  <rect width="512" height="512" rx="96" fill="#0b0b0f"/>
+  <g fill="none" stroke="#e8e8ee" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 机身 -->
+    <rect x="118" y="182" width="276" height="150" rx="28"/>
+    <!-- 顶部取景器 -->
+    <rect x="206" y="142" width="100" height="42" rx="14"/>
+    <!-- 镜头外圈 -->
+    <circle cx="256" cy="257" r="62"/>
+    <!-- 镜头内圈 -->
+    <circle cx="256" cy="257" r="28"/>
+  </g>
+  <!-- 风暴闪电（强调色） -->
+  <path d="M270 196 L238 266 L262 266 L234 326 L296 244 L268 244 Z"
+        fill="#7cc7ff" stroke="#7cc7ff" stroke-width="6" stroke-linejoin="round"/>
+</svg>
