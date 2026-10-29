@@ -17,6 +17,10 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* hidden 属性必须始终生效：作者样式表里的 display 声明（如 .preview/.meters 的 flex）
+   会覆盖 UA 样式表的 [hidden]{display:none}，故在此统一兜底并加 !important。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
