@@ -3,6 +3,11 @@
 // 闪光灯(torch)、变焦、MediaRecorder 录影。
 // 所有浏览器能力缺失均做 try/catch 优雅降级，不抛出到 UI 层造成白屏。
 
+/** 数值夹取 */
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 export class CameraController {
   constructor() {
     this.stream = null;
@@ -20,7 +25,8 @@ export class CameraController {
   /**
    * 启动摄像头并绑定到 video 元素。
    * @param {HTMLVideoElement} videoEl
-   * @param {{facing?:string, audio?:boolean, width?:number, height?:number, frameRate?:number}} opts
+   * @param {{facing?:string, audio?:boolean, width?:number, height?:number, frameRate?:number, deviceId?:string}} opts
+   *   deviceId 存在时优先用精确 deviceId 选镜头（多摄设备可选中超广角），否则回退 facingMode。
    */
   async start(videoEl, opts = {}) {
     const facing = opts.facing || this.facing;
@@ -33,11 +39,15 @@ export class CameraController {
     this.stop();
 
     const base = {
-      facingMode: facing,
       width: { ideal: width },
       height: { ideal: height },
       frameRate: { ideal: frameRate },
     };
+    if (opts.deviceId) {
+      base.deviceId = { exact: opts.deviceId };
+    } else {
+      base.facingMode = facing;
+    }
 
     let stream = null;
     try {
@@ -173,19 +183,37 @@ export class CameraController {
     return !!cap.torch || !!(this.imageCapture && typeof this.imageCapture.setOptions === 'function');
   }
 
-  /** 变焦（若设备支持） */
-  async setZoom(z) {
+  /**
+   * 变焦。factor 为相对 1x 的倍率（1 = 不变焦）。
+   * 设备原生 zoom 约束的值域是相机自己的 min~max（不一定是倍率语义），
+   * 当 caps.zoom 存在且 max > 1 时按「factor 相对 1x」映射：
+   *   value = min + (max - min) * ((factor - 1) / (maxZoomFactor - 1))，
+   *   其中 maxZoomFactor = min(caps.zoom.max, 6)。
+   * 不支持 / 无 stream 时返回 false，由调用方做数字变焦兜底（绝不静默失败）。
+   * @param {number} factor 倍率，>= 1
+   * @returns {Promise<boolean>} 是否应用了原生变焦
+   */
+  async setZoom(factor) {
     if (!this.stream) return false;
     const track = this.stream.getVideoTracks()[0];
     if (!track) return false;
     try {
-      const cap = track.getCapabilities ? track.getCapabilities() : {};
-      if (cap.zoom) {
-        await track.applyConstraints({ advanced: [{ zoom: z }] });
-        return true;
+      const caps = typeof track.getCapabilities === 'function' ? track.getCapabilities() : null;
+      if (!caps || !caps.zoom || !(caps.zoom.max > 1)) return false;
+      const min = typeof caps.zoom.min === 'number' ? caps.zoom.min : 1;
+      const max = caps.zoom.max;
+      const maxFactor = Math.min(max, 6);
+      const f = clamp(factor, 1, maxFactor);
+      let value = min;
+      if (maxFactor > 1) {
+        value = min + (max - min) * ((f - 1) / (maxFactor - 1));
       }
-    } catch (e) { /* ignore */ }
-    return false;
+      value = clamp(value, min, max);
+      await track.applyConstraints({ advanced: [{ zoom: value }] });
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   /** 麦克风音轨（用于录影混入音频） */

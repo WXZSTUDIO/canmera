@@ -88,6 +88,8 @@ html, body {
   background: currentColor;
 }
 .focal .fi.active { color: var(--green); }
+/* 不可用档位置灰（如单摄设备的 0.5x），避免「点了没反应」 */
+.focal .fi:disabled { opacity: 0.28; cursor: default; }
 
 /* ---------- 顶部 ---------- */
 .top {
@@ -232,7 +234,7 @@ html, body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(152px + var(--safe-b));
+  bottom: calc(184px + var(--safe-b));
   display: flex;
   gap: 6px;
   padding: 0 10px;
@@ -261,7 +263,7 @@ html, body {
   position: absolute;
   left: 8px;
   right: 8px;
-  bottom: calc(78px + var(--safe-b));
+  bottom: calc(108px + var(--safe-b));
   display: flex;
   justify-content: space-between;
   padding: 6px 10px;

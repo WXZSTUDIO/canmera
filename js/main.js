@@ -115,6 +115,8 @@ const state = {
   lastResult: null,
   faces: [],
   lowWarned: false,
+  currentLens: 'wide', // 当前焦距档位：'ultra' | 'wide' | 'tele' | 'front'
+  lensDeviceId: null,  // 当前 stream 由精确 deviceId 打开时记录之（用于判断 wide 是否需强制重开）
 };
 
 // ---------- 工具 ----------
@@ -305,6 +307,7 @@ async function startCamera(opts = {}) {
       frameRate: settings.fps,
     });
     metersEl.hidden = !camera.audioOn;
+    state.lensDeviceId = null; // startCamera 不带 deviceId，清除精确镜头标记
     if (settings.torch) {
       const ok = await camera.setTorch(true);
       if (!ok) toast('当前设备不支持闪光灯');
@@ -319,6 +322,7 @@ async function startCamera(opts = {}) {
     renderer.start();
     setStatus('');
     brandTip.textContent = (camera.facing === 'user' ? '前置' : '后置') + ' ' + settings.res + ' · ' + settings.fps;
+    updateFocalAvailability(); // 权限到手后重新检测镜头数量，刷新档位可用态
     updateRemain();
   } catch (e) {
     setStatus('无法访问摄像头：' + (e && e.message ? e.message : e));
@@ -338,7 +342,10 @@ document.querySelector('.pro[data-k="flip"]').addEventListener('click', async ()
       height: RES[settings.res][1],
       frameRate: settings.fps,
     });
-    if (renderer) { renderer.setSource(video, 'video'); renderer.start(); }
+    if (renderer) { renderer.setSource(video, 'video'); renderer.setZoom(1); renderer.start(); }
+    state.lensDeviceId = null; // flip 走 facingMode 重开，清除精确镜头标记
+    state.currentLens = facing === 'user' ? 'front' : 'wide';
+    setFocalActive(state.currentLens);
     brandTip.textContent = (facing === 'user' ? '前置' : '后置') + ' ' + settings.res + ' · ' + settings.fps;
     toast('已切换镜头：' + (facing === 'user' ? '前置' : '后置'));
   } catch (e) {
@@ -346,32 +353,163 @@ document.querySelector('.pro[data-k="flip"]').addEventListener('click', async ()
   }
 });
 
-// 焦距/镜头条
-focalEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('.fi');
-  if (!btn) return;
-  const lens = btn.dataset.lens;
-  [...focalEl.children].forEach((c) => c.classList.toggle('active', c === btn));
-  const facing = lens === 'front' ? 'user' : 'environment';
+// ---------- 焦距/镜头条 ----------
+// 档位为倍率语义：0.5x(超广角，仅设备有多摄时可用) / 1x(主摄) / 2x(长焦) / 前置。
+// 0.5x 与 1x 走物理镜头切换（优先 deviceId 精确匹配），2x 走变焦（原生优先、数字兜底）。
+function focalBtns() {
+  return [...focalEl.querySelectorAll('.fi')];
+}
+
+function setFocalActive(lens) {
+  focalBtns().forEach((b) => b.classList.toggle('active', b.dataset.lens === lens));
+}
+
+/** 枚举摄像头数量；仅 1 个时把 0.5x 置灰，避免「点了没反应」 */
+async function updateFocalAvailability() {
+  let count = 0;
+  try {
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      count = devs.filter((d) => d.kind === 'videoinput').length;
+    }
+  } catch (e) { /* 检测失败保持默认（不禁用，点击后有 toast 反馈） */ }
+  focalBtns().forEach((b) => {
+    if (b.dataset.lens === 'ultra') {
+      b.disabled = count < 2;
+      b.title = count < 2 ? '此设备未发现超广角镜头' : '';
+    }
+  });
+}
+
+/**
+ * 按档位语义查找物理镜头 deviceId（需已授权，否则 label 为空匹配不到）。
+ * @param {'ultra'|'wide'} kind
+ * @returns {Promise<string|null>}
+ */
+async function findLensDevice(kind) {
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const vids = devs.filter((d) => d.kind === 'videoinput');
+    if (kind === 'ultra') {
+      const hit = vids.find((d) => /ultra|超广|广角超|0\.5/i.test(d.label) && !/front|前/i.test(d.label));
+      return hit ? hit.deviceId : null;
+    }
+    const hit = vids.find((d) =>
+      /back|rear|后|wide|主|广角/i.test(d.label) && !/ultra|超广|front|前/i.test(d.label)
+    );
+    return hit ? hit.deviceId : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 应用变焦倍率：优先原生相机 zoom，失败回退 WebGL 数字变焦。
+ * @returns {Promise<'native'|'digital'|null>} 实际生效路径；null 表示完全失败
+ */
+async function applyZoom(factor) {
   if (camera && camera.stream) {
-    camera.start(video, {
-      facing,
-      audio: settings.mic,
-      width: RES[settings.res][0],
-      height: RES[settings.res][1],
-      frameRate: settings.fps,
-    }).then(() => {
-      if (renderer) { renderer.setSource(video, 'video'); renderer.start(); }
-      if (lens === 'ultra') camera.setZoom(0.5).catch(() => {});
-      else camera.setZoom(1).catch(() => {});
-      brandTip.textContent = (facing === 'user' ? '前置' : '后置') + ' ' + settings.res + ' · ' + settings.fps;
-    }).catch(() => toast('切换镜头失败'));
-  } else {
+    const ok = await camera.setZoom(factor);
+    if (ok) {
+      if (renderer) renderer.setZoom(1); // 原生变焦生效，数字变焦复位，避免双重放大
+      return 'native';
+    }
+  }
+  if (renderer) {
+    renderer.setZoom(factor);
+    return 'digital';
+  }
+  return null;
+}
+
+focalEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.fi');
+  if (!btn || btn.disabled) return;
+  const lens = btn.dataset.lens;
+  if (state.starting) return; // 防并发
+
+  // 相机尚未开启：先记档位与朝向，交给 startCamera 统一启动
+  if (!camera || !camera.stream) {
     camera = camera || new CameraController();
-    camera.facing = facing;
+    camera.facing = lens === 'front' ? 'user' : 'environment';
+    state.currentLens = lens;
+    setFocalActive(lens);
     startCamera();
+    return;
+  }
+
+  state.starting = true;
+  try {
+    if (lens === 'tele') {
+      // 再次点击当前 2x 档取消，回到 1x
+      if (state.currentLens === 'tele') {
+        await applyZoom(1);
+        state.currentLens = 'wide';
+        setFocalActive('wide');
+        toast('已恢复 1x');
+        return;
+      }
+      const how = await applyZoom(2);
+      if (how === 'native') toast('长焦 2x（原生变焦）');
+      else if (how === 'digital') toast('长焦 2x（数字变焦）');
+      else toast('变焦失败：相机未就绪');
+    } else {
+      // 0.5x / 1x / 前置：切换物理镜头
+      const facing = lens === 'front' ? 'user' : 'environment';
+      const facingName = facing === 'user' ? '前置' : '后置';
+      // 超广角必须有独立镜头支撑，否则提示而不是假装切换成功
+      let deviceId = null;
+      if (lens === 'ultra') {
+        deviceId = await findLensDevice('ultra');
+        if (!deviceId) { toast('未找到超广角镜头'); return; }
+      } else if (lens === 'wide') {
+        // 1x 同样尝试精确匹配主摄（正则已排除 ultra/超广/前置，避免误选超广角）
+        deviceId = await findLensDevice('wide');
+      }
+      // 需要重开相机的两种情况：a) 命中了目标 deviceId；
+      // b) 当前 stream 由某个 deviceId 打开（如正处于超广角）且目标档位未命中
+      //    deviceId —— 此时必须强制经 facingMode 重开回默认主摄，只复位变焦会假成功。
+      const needRestart = !!deviceId || !!state.lensDeviceId;
+      if (camera.facing !== facing || needRestart) {
+        const [w, h] = RES[settings.res];
+        await camera.start(video, {
+          facing,
+          deviceId: deviceId || undefined,
+          audio: settings.mic,
+          width: w,
+          height: h,
+          frameRate: settings.fps,
+        });
+        state.lensDeviceId = deviceId || null;
+        if (renderer) {
+          renderer.setSource(video, 'video'); // 新 stream 重新绑定 video 元素并触发纹理上传
+          renderer.setZoom(1);                // 切镜头后数字变焦复位
+          renderer.start();
+        }
+        brandTip.textContent = facingName + ' ' + settings.res + ' · ' + settings.fps;
+        toast(lens === 'ultra' ? '已切换到超广角 0.5x'
+          : lens === 'wide' ? '已切换到主摄 1x'
+          : '已切换到 ' + facingName);
+      } else {
+        // 同朝向且未用精确镜头：仅复位变焦到 1x
+        await applyZoom(1);
+        toast('已恢复 1x');
+      }
+    }
+    state.currentLens = lens;
+    setFocalActive(lens);
+  } catch (err) {
+    // 失败必须可感知：toast 给出原因，并恢复上一个成功档位的高亮
+    toast('切换失败：' + (err && err.message ? err.message : err));
+    setFocalActive(state.currentLens);
+  } finally {
+    state.starting = false;
   }
 });
+
+// 页面加载即做一次镜头数量探测（未授权时拿不到 label，授权后 startCamera 会再刷一次）
+updateFocalAvailability();
 
 // ---------- 专业面板 ----------
 function sliderRow(label, min, max, step, value, fmt, onInput) {
@@ -980,7 +1118,7 @@ if ('serviceWorker' in navigator) {
         const keys = await caches.keys();
         await Promise.all(
           keys
-            .filter((k) => k.startsWith('canmera-') && k !== 'canmera-v2')
+            .filter((k) => k.startsWith('canmera-') && k !== 'canmera-v3')
             .map((k) => caches.delete(k))
         );
       }

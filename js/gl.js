@@ -37,6 +37,7 @@ uniform vec2 u_uvScale;
 uniform float u_trail;
 uniform float u_highlight;
 uniform float u_sdr;
+uniform float u_zoom;
 
 float rand(vec2 co) {
   return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
@@ -57,8 +58,13 @@ mat3 hueMatrix(float a) {
 }
 
 void main() {
-  // cover 裁剪：把源画面按比例裁切铺满画布
-  vec2 uv = (v_uv - 0.5) * u_uvScale + 0.5;
+  // 数字变焦 + cover 裁剪：先中心化 (v_uv - 0.5)、除以 zoom 收窄采样窗口、
+  // 再乘 uvScale（cover 比例）、最后加 0.5。等价于 uv = 0.5 + (v_uv - 0.5) * u_uvScale / u_zoom。
+  // zoom = 1 时精确退化回原 cover 公式 (v_uv - 0.5) * u_uvScale + 0.5。
+  // 恒不越界：|v_uv - 0.5| <= 0.5，除以 zoom(>=1)、乘 uvScale(<=1) 后仍 <= 0.5，
+  // 故 zoom >= 1 时下方越界填黑分支永不触发（保留以兜底异常输入）。
+  vec2 uv = (v_uv - 0.5) / u_zoom;
+  uv = uv * u_uvScale + 0.5;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
     return;
@@ -203,6 +209,7 @@ export class GLRenderer {
       trail: u('u_trail'),
       highlight: u('u_highlight'),
       sdr: u('u_sdr'),
+      zoom: u('u_zoom'),
     };
     this.gl.uniform1i(this.u.tex, 0);
     this.gl.uniform1i(this.u.prevTex, 1);
@@ -230,6 +237,7 @@ export class GLRenderer {
     this.temperature = 6500;
     this.totalExp = 1;
     this.trail = 0;
+    this.zoom = 1;         // 数字变焦倍率（>=1，仅影响预览渲染）
 
     this.startTime = performance.now();
     this.running = false;
@@ -318,6 +326,12 @@ export class GLRenderer {
     this.temperature = k;
   }
 
+  /** 数字变焦倍率（WebGL 兜底路径）：>= 1，1 表示不变焦 */
+  setZoom(f) {
+    const v = typeof f === 'number' && isFinite(f) ? f : 1;
+    this.zoom = clamp(v, 1, 8);
+  }
+
   /** 合成总曝光：曝光补偿 · ISO 增益 · 快门增益，并推导慢快门拖影强度 */
   _updateExposure() {
     const isoGain = this.iso == null ? 1 : clamp(this.iso / 400, 0.2, 8);
@@ -391,6 +405,7 @@ export class GLRenderer {
     gl.uniform1f(this.u.trail, this.trail);
     gl.uniform1f(this.u.highlight, this.highlight);
     gl.uniform1f(this.u.sdr, this.sdr);
+    gl.uniform1f(this.u.zoom, this.zoom);
 
     // cover 裁剪比例
     const cw = this.canvas.width;
