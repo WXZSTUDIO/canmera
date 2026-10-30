@@ -5,7 +5,7 @@
 // （典型症状：修了 Bug 但用户刷新后问题依旧）。故改为网络优先 + 超时兜底，
 // 保证「有网时永远拿最新代码，断网时仍可离线打开」。
 
-const CACHE = 'canmera-v3';
+const CACHE = 'canmera-v4';
 const ASSETS = [
   './',
   './index.html',

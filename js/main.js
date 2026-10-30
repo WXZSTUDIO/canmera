@@ -33,6 +33,7 @@ const metersEl = document.getElementById('meters');
 const dotsL = document.getElementById('dots-l');
 const dotsR = document.getElementById('dots-r');
 const badgeLog = document.getElementById('badge-log');
+const badgeMp = document.getElementById('badge-mp');
 const btnMode = document.getElementById('btn-mode');
 const btnRes = document.getElementById('btn-res');
 const remainMin = document.getElementById('remain-min');
@@ -232,9 +233,37 @@ function updateResBtn() {
 function updateMode() {
   btnMode.textContent = state.mode === 'video' ? '▶ 视频' : '● 照片';
 }
+
+/** 同步快门配色：照片=白 / 视频=红（录制中的白底红圈由 .recording 覆盖，互不冲突） */
+function syncShutterMode() {
+  btnShutter.classList.toggle('video', state.mode === 'video');
+}
+
+/**
+ * 照片模式下显示实际取流分辨率（MP）。诚实取 track.getSettings() 的宽高，
+ * 取不到（API 缺失/无 stream/视频模式）时隐藏徽标，绝不显示假数据。
+ * MP 格式：四舍五入到一位小数，.0 时省略（如 2.1MP / 8.3MP / 12MP）。
+ */
+function updateMpBadge() {
+  if (state.mode !== 'photo') { badgeMp.hidden = true; return; }
+  try {
+    const track = camera && camera.stream ? camera.stream.getVideoTracks()[0] : null;
+    const s = track && typeof track.getSettings === 'function' ? track.getSettings() : null;
+    if (s && s.width > 0 && s.height > 0) {
+      const mp = Math.round((s.width * s.height) / 1e6 * 10) / 10;
+      badgeMp.textContent = (mp % 1 === 0 ? mp.toFixed(0) : mp.toFixed(1)) + 'MP';
+      badgeMp.hidden = false;
+      return;
+    }
+  } catch (e) { /* getSettings 异常时降级为隐藏 */ }
+  badgeMp.hidden = true;
+}
+
 btnMode.addEventListener('click', () => {
   state.mode = state.mode === 'photo' ? 'video' : 'photo';
   updateMode();
+  syncShutterMode();
+  updateMpBadge();
   toast(state.mode === 'video' ? '视频模式' : '照片模式');
 });
 btnRes.addEventListener('click', () => {
@@ -323,6 +352,7 @@ async function startCamera(opts = {}) {
     setStatus('');
     brandTip.textContent = (camera.facing === 'user' ? '前置' : '后置') + ' ' + settings.res + ' · ' + settings.fps;
     updateFocalAvailability(); // 权限到手后重新检测镜头数量，刷新档位可用态
+    updateMpBadge(); // 重新取流后刷新实际分辨率徽标（含 RES 变更后的重开）
     updateRemain();
   } catch (e) {
     setStatus('无法访问摄像头：' + (e && e.message ? e.message : e));
@@ -347,6 +377,7 @@ document.querySelector('.pro[data-k="flip"]').addEventListener('click', async ()
     state.currentLens = facing === 'user' ? 'front' : 'wide';
     setFocalActive(state.currentLens);
     brandTip.textContent = (facing === 'user' ? '前置' : '后置') + ' ' + settings.res + ' · ' + settings.fps;
+    updateMpBadge(); // flip 重开流后刷新实际分辨率徽标
     toast('已切换镜头：' + (facing === 'user' ? '前置' : '后置'));
   } catch (e) {
     toast('切换镜头失败：' + (e && e.message ? e.message : e));
@@ -488,6 +519,7 @@ focalEl.addEventListener('click', async (e) => {
           renderer.start();
         }
         brandTip.textContent = facingName + ' ' + settings.res + ' · ' + settings.fps;
+        updateMpBadge(); // 切镜头重开流后刷新实际分辨率徽标
         toast(lens === 'ultra' ? '已切换到超广角 0.5x'
           : lens === 'wide' ? '已切换到主摄 1x'
           : '已切换到 ' + facingName);
@@ -534,7 +566,8 @@ function toggleRow(label, checked, onChange) {
   lab.innerHTML = '<span>' + label + '</span><input type="checkbox"><span class="sw"></span>';
   const input = lab.querySelector('input');
   input.checked = !!checked;
-  input.addEventListener('change', () => onChange(input.checked));
+  // 第二个参数把 checkbox 元素传给回调，供调用方在异常时回滚开关 UI
+  input.addEventListener('change', () => onChange(input.checked, input));
   return lab;
 }
 
@@ -663,6 +696,12 @@ function openPanel(kind) {
       updateResBtn();
       persist();
       toast('照片分辨率：' + v);
+      // 相机已开启时重开流，让新分辨率即时生效并刷新 MP 徽标
+      //（startCamera 内部有防并发与失败提示；无缝换流保证失败时旧画面不断，仅分辨率维持原值）
+      if (camera && camera.stream) {
+        if (state.starting) { toast('正在处理镜头操作，请稍候'); return; }
+        startCamera();
+      }
     }));
     push(segRow('视频帧率', FPS_OPTS.map((f) => ({ label: f + 'fps', value: f })), settings.fps, (v) => {
       settings.fps = v;
@@ -690,20 +729,35 @@ function openPanel(kind) {
       settings.swipeLooks = on;
       persist();
     }));
-    push(toggleRow('麦克风（音频电平 + 录制收声）', settings.mic, async (on) => {
+    push(toggleRow('麦克风（音频电平 + 录制收声）', settings.mic, async (on, input) => {
+      // 与 flip/focal 重开流互斥，避免竞态（开关 UI 一并回滚）
+      if (state.starting) {
+        input.checked = !on;
+        toast('正在处理镜头操作，请稍候');
+        return;
+      }
       settings.mic = on;
       persist();
       if (camera && camera.stream) {
-        await camera.start(video, {
-          facing: camera.facing,
-          audio: on,
-          width: RES[settings.res][0],
-          height: RES[settings.res][1],
-          frameRate: settings.fps,
-        });
-        if (renderer) { renderer.setSource(video, 'video'); renderer.start(); }
-        metersEl.hidden = !camera.audioOn;
-        if (!camera.audioOn && on) toast('麦克风不可用，已回退为纯视频');
+        try {
+          await camera.start(video, {
+            facing: camera.facing,
+            audio: on,
+            width: RES[settings.res][0],
+            height: RES[settings.res][1],
+            frameRate: settings.fps,
+          });
+          if (renderer) { renderer.setSource(video, 'video'); renderer.start(); }
+          metersEl.hidden = !camera.audioOn;
+          updateMpBadge(); // 麦克风开关会重开流，刷新实际分辨率徽标
+          if (!camera.audioOn && on) toast('麦克风不可用，已回退为纯视频');
+        } catch (e) {
+          // 重开失败：无缝换流保证旧流未断、画面不中断，仅回滚开关设置与 UI、恢复电平条显隐
+          settings.mic = !on;
+          input.checked = !on;
+          metersEl.hidden = !camera.audioOn;
+          toast('麦克风切换失败：' + (e && e.message ? e.message : e));
+        }
       } else {
         toast(on ? '麦克风将在开启相机后生效' : '已关闭麦克风');
       }
@@ -1095,6 +1149,8 @@ renderLooks();
 badgeLog.hidden = state.look.kind !== 'log';
 updateResBtn();
 updateMode();
+syncShutterMode(); // 初始化快门配色（photo=白 / video=红）
+updateMpBadge();   // 相机未开启时此调用会把 MP 徽标隐藏
 gridEl.hidden = !settings.grid;
 updateRemain();
 if (!renderer) {
@@ -1118,7 +1174,7 @@ if ('serviceWorker' in navigator) {
         const keys = await caches.keys();
         await Promise.all(
           keys
-            .filter((k) => k.startsWith('canmera-') && k !== 'canmera-v3')
+            .filter((k) => k.startsWith('canmera-') && k !== 'canmera-v4')
             .map((k) => caches.delete(k))
         );
       }

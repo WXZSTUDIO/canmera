@@ -162,6 +162,20 @@ html, body {
   letter-spacing: 0.4px;
 }
 
+/* 当前照片分辨率徽标：中性色（描边 + 半透明底），与绿色 Log 徽标区分 */
+.badge-mp {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--fg-2);
+  border: 0.5px solid var(--line);
+  background: var(--surface);
+  padding: 3px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.4px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .remain {
   margin-left: auto;
   display: flex;
@@ -305,7 +319,7 @@ html, body {
 .pro span { font-size: 9px; letter-spacing: 0.1px; }
 .pro.active { color: var(--green); }
 
-/* ---------- 快门 ---------- */
+/* 快门三态：照片=白色 / 视频=红色 / 录制中=白底红圈（iOS 相机语义） */
 .shutter {
   position: absolute;
   left: 50%;
@@ -315,7 +329,7 @@ html, body {
   height: 66px;
   border-radius: 50%;
   border: 0;
-  background: var(--red);
+  background: #fff;
   cursor: pointer;
   padding: 0;
 }
@@ -326,6 +340,7 @@ html, body {
   border-radius: 50%;
 }
 .shutter:active { transform: translateX(-50%) scale(0.94); }
+.shutter.video { background: var(--red); }
 .shutter.recording { background: #fff; }
 .shutter.recording .ring { border-color: var(--red); }
 

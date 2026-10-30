@@ -36,7 +36,9 @@ export class CameraController {
     const wantAudio = !!opts.audio;
 
     this.facing = facing;
-    this.stop();
+    // 无缝换流：这里不再先 stop() 旧流。
+    // 旧流保持活跃、video 元素继续播放旧画面，等待新流期间 WebGL 持续渲染，
+    // 避免出现「先冻结再跳变」的抖动感。新流拿到后才切换（见下方）。
 
     const base = {
       width: { ideal: width },
@@ -63,9 +65,21 @@ export class CameraController {
       this.audioOn = false;
     }
 
+    // 失败路径到此为止：getUserMedia 抛错时旧流未动、srcObject 未变，
+    // 画面完全不中断，错误直接抛给调用方（由其做 toast + 恢复高亮）。
+    // 新流到手后才停旧流（先停 track 再换 srcObject，避免中间态）。
+    if (this.stream) {
+      this.stream.getTracks().forEach((t) => t.stop());
+    }
     this.stream = stream;
     videoEl.srcObject = stream;
-    await videoEl.play();
+    try {
+      await videoEl.play();
+    } catch (e) {
+      // play() 被自动播放策略等拦截时不应中断换流：旧流已停、新流已绑定，
+      // 仅记录告警后继续走 imageCapture / 音频链重建，保证函数正常返回新流。
+      console.warn('video.play() 被拒绝（不影响换流）：', e);
+    }
 
     try {
       if ('ImageCapture' in window) {
@@ -76,8 +90,19 @@ export class CameraController {
       this.imageCapture = null;
     }
 
+    // 音频链重建：先关闭旧 AudioContext 再建新链，防止句柄泄漏
+    this._teardownAudio();
     if (this.audioOn) this._setupAudio(stream);
     return stream;
+  }
+
+  /** 关闭并清理音频分析链（AudioContext 必须显式 close，防止句柄泄漏） */
+  _teardownAudio() {
+    if (this.audioCtx) {
+      try { this.audioCtx.close(); } catch (e) { /* ignore */ }
+      this.audioCtx = null;
+    }
+    this.analysers = null;
   }
 
   /** 建立音频分析链：MediaStream -> Splitter -> 左右声道 Analyser */
@@ -248,16 +273,13 @@ export class CameraController {
     });
   }
 
+  /** 显式停止：停掉全部 track 并释放资源（供页面卸载/完全关闭用） */
   stop() {
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop());
       this.stream = null;
     }
-    if (this.audioCtx) {
-      try { this.audioCtx.close(); } catch (e) { /* ignore */ }
-      this.audioCtx = null;
-    }
-    this.analysers = null;
+    this._teardownAudio();
     this.imageCapture = null;
     this.audioOn = false;
   }
