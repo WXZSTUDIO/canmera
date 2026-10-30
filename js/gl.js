@@ -157,6 +157,11 @@ export class GLRenderer {
     }
     if (!this.gl) throw new Error('当前浏览器不支持 WebGL');
 
+    // WebGL 规范：texImage2D 上传图像时第一行（视觉顶部）存于 v=0。
+    // 顶点缓冲将 v=0 映射到画布底部，故必须翻转 Y，否则画面上下颠倒。
+    // 全局像素存储状态，设置一次对本文件全部 4 处 texImage2D 生效。
+    this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, true);
+
     this.program = this._createProgram();
     this.gl.useProgram(this.program);
 

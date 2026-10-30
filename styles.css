@@ -259,19 +259,25 @@ html, body {
 /* ---------- 底部专业控制行 ---------- */
 .pro-bar {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 8px;
+  right: 8px;
   bottom: calc(78px + var(--safe-b));
   display: flex;
   justify-content: space-between;
-  padding: 0 8px;
+  padding: 6px 10px;
+  background: rgba(12, 12, 12, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
 }
 .pro {
   appearance: none;
   border: 0;
   background: none;
   padding: 4px 0;
-  width: 13%;
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -574,6 +580,6 @@ html, body {
 
 @media (min-width: 720px) {
   .pro-bar { justify-content: center; gap: 24px; }
-  .pro { width: 56px; }
+  .pro { flex: 0 0 56px; width: 56px; }
   .looks-strip { justify-content: center; }
 }
